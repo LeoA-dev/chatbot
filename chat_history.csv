@@ -1,7 +1,0 @@
-ChatID,Role,Content
-abc123456789,user,Hello, how are you?
-abc123456789,assistant,I'm great, thanks! How can I help?
-abc123456789,user,What's the weather today?
-abc123456789,assistant,The weather is sunny with a high of 25°C.
-def987654321,user,Tell me a joke.
-def987654321,assistant,Why don't scientists trust atoms? Because they make up everything!
