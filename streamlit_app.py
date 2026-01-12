@@ -1,100 +1,180 @@
 import streamlit as st
 from openai import OpenAI
-import openai
-import time
-import json
 import os
+import io
+import base64
 
-# Title
-st.title("💬 Analysen Chatbot with Selectable Histories")
-st.write("Chat with GPT-4o-mini and continue or manage multiple conversations.")
+# Optional libraries for document/image parsing
+try:
+    import PyPDF2
+except Exception:
+    PyPDF2 = None
 
-# Secrets
-openai_api_key = st.secrets.openai_api_key
-ASSISTANT_ID = st.secrets.ASSISTANT_ID
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
-client = OpenAI(api_key=openai_api_key)
-openai.api_key = openai_api_key
+try:
+    import pytesseract
+except Exception:
+    pytesseract = None
 
-# Constants
-CHAT_DIR = "chat_histories"
-os.makedirs(CHAT_DIR, exist_ok=True)
+# -----------------------------
+# CONFIG
+# -----------------------------
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+VECTOR_STORE_ID = st.secrets["OPENAI_VECTOR_STORE_ID"] # set this in your env variables
 
-# Session State
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# -----------------------------
+# STREAMLIT UI
+# -----------------------------
+st.set_page_config(page_title="RAG Chatbot", layout="centered")
+st.title("CHECK-Ki Chatbot")
+
+# File uploads: allow attaching photos and documents
+uploaded_files = st.file_uploader("Fotos/Dokumente anhängen (optional)", type=None, accept_multiple_files=True)
+
+# User prompt
+prompt = st.text_input("Frage stellen:")
+
+
+def extract_text_from_file(uploaded_file):
+    name = uploaded_file.name
+    lower = name.lower()
+    data = uploaded_file.getvalue()
+
+    # Text-like files
+    if lower.endswith(('.txt', '.md', '.csv')):
+        try:
+            return data.decode('utf-8')
+        except Exception:
+            return data.decode('latin-1', errors='ignore')
+
+    # PDF
+    if lower.endswith('.pdf') and PyPDF2 is not None:
+        try:
+            reader = PyPDF2.PdfReader(io.BytesIO(data))
+            text = []
+            for p in reader.pages:
+                try:
+                    text.append(p.extract_text() or "")
+                except Exception:
+                    continue
+            return "\n\n".join(text)
+        except Exception:
+            return f"(Konnte PDF {name} nicht extrahieren.)"
+
+    # Images: try OCR if available
+    if lower.endswith(('.png', '.jpg', '.jpeg')) and Image is not None:
+        if pytesseract is not None:
+            try:
+                img = Image.open(io.BytesIO(data))
+                text = pytesseract.image_to_string(img)
+                return text or f"(Bild {name} ohne erkennbaren Text.)"
+            except Exception:
+                return f"(OCR für Bild {name} fehlgeschlagen.)"
+        else:
+            return f"(Bild {name} angehängt; OCR nicht verfügbar in der Umgebung.)"
+
+    # Fallback: include filename and size
+    return f"(Datei {name} angehängt — Typ unbekannt oder nicht unterstützte Extraktion. Größe: {len(data)} bytes)"
+
+# Keep chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "thread_id" not in st.session_state:
-    thread = openai.beta.threads.create()
-    st.session_state.thread_id = thread.id
-if "current_chat" not in st.session_state:
-    st.session_state.current_chat = None
 
-# --- Load Chat ---
-chat_files = [f[:-5] for f in os.listdir(CHAT_DIR) if f.endswith(".json")]
-selected_chat = st.selectbox("📂 Load a saved chat to continue", ["Select a chat..."] + chat_files)
+# Display previous messages
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.write(m["content"])
 
-if selected_chat != "Select a chat..." and selected_chat != st.session_state.current_chat:
-    with open(os.path.join(CHAT_DIR, f"{selected_chat}.json"), "r") as f:
-        data = json.load(f)
-        st.session_state.messages = data.get("messages", [])
-        st.session_state.thread_id = data.get("thread_id")
-        st.session_state.current_chat = selected_chat
-    st.success(f"✅ Loaded and ready to continue: {selected_chat}")
-    st.rerun()
-
-# --- Save Chat ---
-with st.expander("💾 Save Current Chat"):
-    chat_name = st.text_input("Enter a name for this chat history", value=st.session_state.current_chat or "")
-    if st.button("Save Chat") and chat_name.strip():
-        path = os.path.join(CHAT_DIR, f"{chat_name.strip()}.json")
-        data = {
-            "messages": st.session_state.messages,
-            "thread_id": st.session_state.thread_id
-        }
-        with open(path, "w") as f:
-            json.dump(data, f)
-        st.success(f"💾 Chat saved as: {chat_name.strip()}")
-        st.session_state.current_chat = chat_name.strip()
-
-# --- Display Chat ---
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# --- Chat Input & Response ---
-if prompt := st.chat_input("Say something..."):
-    # Store user message
+if prompt:
+    # Show user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.write(prompt)
 
-    # Send to assistant via existing thread
-    openai.beta.threads.messages.create(
-        thread_id=st.session_state.thread_id,
-        role="user",
-        content=prompt
-    )
+    # -----------------------------
+    # STEP 1: Vector Search
+    # -----------------------------
+    try:
+        search_res = client.vector_stores.search(
+            vector_store_id=VECTOR_STORE_ID,
+            query=prompt
+        )
+    except Exception as e:
+        st.error(f"Search error: {e}")
+        st.stop()
 
-    run = openai.beta.threads.runs.create(
-        thread_id=st.session_state.thread_id,
-        assistant_id=ASSISTANT_ID
-    )
+    # -----------------------------
+    # STEP 2: Extract context
+    # -----------------------------
+    context_text = ""
 
-    with st.spinner("Thinking..."):
-        while True:
-            run_status = openai.beta.threads.runs.retrieve(
-                thread_id=st.session_state.thread_id,
-                run_id=run.id
-            )
-            if run_status.status == "completed":
-                break
-            time.sleep(1)
+    for hit in search_res.data:
+        if hasattr(hit, "content") and hit.content:
+            for part in hit.content:
+                # OpenAI spec: part.type == "text"
+                if part.type == "text" and hasattr(part, "text"):
+                    context_text += part.text + "\n\n"
 
-    messages = openai.beta.threads.messages.list(
-        thread_id=st.session_state.thread_id
-    )
-    reply = messages.data[0].content[0].text.value
+    if not context_text:
+        context_text = "(Kein relevanter Kontext gefunden.)"
 
-    # Show and save assistant reply
-    st.chat_message("assistant").write(reply)
-    st.session_state.messages.append({"role": "assistant", "content": reply})
+    # -----------------------------
+    # Attachments: extract text from uploaded files
+    # -----------------------------
+    attachments_text = ""
+    if uploaded_files:
+        for f in uploaded_files:
+            try:
+                extracted = extract_text_from_file(f)
+            except Exception as e:
+                extracted = f"(Fehler beim Verarbeiten von {f.name}: {e})"
+            attachments_text += f"--- Datei: {f.name} ---\n{extracted}\n\n"
+        if not attachments_text:
+            attachments_text = "(Hochgeladene Dateien enthalten keinen extrahierbaren Text.)"
+
+    # -----------------------------
+    # STEP 3: Ask GPT
+    # -----------------------------
+    final_prompt = f"""
+You are a helpful and knowledgeable assistant.
+Use the provided context (if meaningful) to answer the user's question.
+If the context does not help, answer the question normally.
+
+KONTEXT:
+{context_text}
+
+DATEIEN (aus Hochladen):
+{attachments_text}
+
+FRAGE:
+{prompt}
+
+ANTWORT:
+"""
+
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-5.2",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": final_prompt}
+            ]
+        )
+        answer = completion.choices[0].message.content
+    except Exception as e:
+        st.error(f"GPT error: {e}")
+        st.stop()
+
+    # -----------------------------
+    # STEP 4: Show assistant answer
+    # -----------------------------
+    st.session_state.messages.append({"role": "assistant", "content": answer})
+
+    with st.chat_message("assistant"):
+        st.write(answer)
