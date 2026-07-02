@@ -160,7 +160,7 @@ ANTWORT:
 
     try:
         completion = client.chat.completions.create(
-            model="gpt-5.2",
+            model="gpt-5.5-pro",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": final_prompt}
