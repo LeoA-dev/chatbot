@@ -3,6 +3,7 @@ from openai import OpenAI
 import os
 import io
 import base64
+import textwrap
 
 # Optional libraries for document/image parsing
 try:
@@ -19,6 +20,18 @@ try:
     import pytesseract
 except Exception:
     pytesseract = None
+
+try:
+    from docx import Document
+except Exception:
+    Document = None
+
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+except Exception:
+    A4 = None
+    canvas = None
 
 # -----------------------------
 # CONFIG
@@ -58,16 +71,6 @@ st.title("CHECK-Ki Chatbot")
 # File uploads: allow attaching photos and documents
 uploaded_files = st.file_uploader("Fotos/Dokumente anhängen (optional)", type=None, accept_multiple_files=True)
 
-selected_model_label = st.selectbox(
-    "Model-Selector",
-    options=list(MODEL_CHOICES.keys()),
-    index=0,
-)
-
-# User prompt
-prompt = st.text_input("Frage stellen:")
-
-
 def choose_model(prompt_text, context_text="", attachments_text=""):
     selected_model = MODEL_CHOICES[selected_model_label]
     if selected_model != "auto":
@@ -83,6 +86,88 @@ def choose_model(prompt_text, context_text="", attachments_text=""):
         return "gpt-5.5"
 
     return "gpt-5.4"
+
+
+def build_conversation_text(messages):
+    if not messages:
+        return "Keine Nachrichten vorhanden."
+
+    lines = []
+    for message in messages:
+        role = "User" if message["role"] == "user" else "Assistant"
+        model = message.get("model")
+        model_suffix = f" ({model})" if model else ""
+        lines.append(f"{role}{model_suffix}:")
+        lines.append(message["content"])
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def build_docx_export(messages):
+    if Document is None:
+        return None
+
+    doc = Document()
+    doc.add_heading("CHECK-Ki Chatbot Conversation", level=1)
+    for message in messages:
+        role = "User" if message["role"] == "user" else "Assistant"
+        model = message.get("model")
+        heading = f"{role} ({model})" if model else role
+        doc.add_heading(heading, level=2)
+        doc.add_paragraph(message["content"])
+
+    output = io.BytesIO()
+    doc.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def build_pdf_export(messages):
+    if A4 is None or canvas is None:
+        return None
+
+    output = io.BytesIO()
+    pdf = canvas.Canvas(output, pagesize=A4)
+    width, height = A4
+    left_margin = 50
+    top_margin = height - 50
+    line_height = 14
+    y = top_margin
+
+    pdf.setFont("Helvetica-Bold", 14)
+    pdf.drawString(left_margin, y, "CHECK-Ki Chatbot Conversation")
+    y -= line_height * 2
+
+    for message in messages:
+        role = "User" if message["role"] == "user" else "Assistant"
+        model = message.get("model")
+        heading = f"{role} ({model})" if model else role
+
+        if y < 70:
+            pdf.showPage()
+            y = top_margin
+
+        pdf.setFont("Helvetica-Bold", 11)
+        pdf.drawString(left_margin, y, heading)
+        y -= line_height
+        pdf.setFont("Helvetica", 10)
+
+        for paragraph in message["content"].splitlines() or [""]:
+            for line in textwrap.wrap(paragraph, width=95) or [""]:
+                if y < 50:
+                    pdf.showPage()
+                    y = top_margin
+                    pdf.setFont("Helvetica", 10)
+                pdf.drawString(left_margin, y, line)
+                y -= line_height
+            y -= 4
+
+        y -= line_height
+
+    pdf.save()
+    output.seek(0)
+    return output.getvalue()
 
 
 def extract_text_from_file(uploaded_file):
@@ -135,11 +220,56 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.write(m["content"])
 
-if prompt:
-    # Show user message
+if st.session_state.messages:
+    txt_export = build_conversation_text(st.session_state.messages).encode("utf-8")
+    docx_export = build_docx_export(st.session_state.messages)
+    pdf_export = build_pdf_export(st.session_state.messages)
+
+    st.subheader("Chat speichern")
+    col_txt, col_docx, col_pdf = st.columns(3)
+    with col_txt:
+        st.download_button(
+            "TXT",
+            data=txt_export,
+            file_name="check-ki-chat.txt",
+            mime="text/plain",
+        )
+    with col_docx:
+        if docx_export is not None:
+            st.download_button(
+                "Word",
+                data=docx_export,
+                file_name="check-ki-chat.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        else:
+            st.button("Word", disabled=True)
+    with col_pdf:
+        if pdf_export is not None:
+            st.download_button(
+                "PDF",
+                data=pdf_export,
+                file_name="check-ki-chat.pdf",
+                mime="application/pdf",
+            )
+        else:
+            st.button("PDF", disabled=True)
+
+selected_model_label = st.selectbox(
+    "Model-Selector",
+    options=list(MODEL_CHOICES.keys()),
+    index=0,
+    key="model_selector",
+)
+
+with st.form("chat_form", clear_on_submit=True):
+    prompt = st.text_input("Frage stellen:")
+    submitted = st.form_submit_button("Senden")
+
+if submitted and prompt.strip():
+    prompt = prompt.strip()
+    previous_messages = st.session_state.messages.copy()
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.write(prompt)
 
     # -----------------------------
     # STEP 1: Vector Search
@@ -190,6 +320,9 @@ You are a helpful and knowledgeable assistant.
 Use the provided context (if meaningful) to answer the user's question.
 If the context does not help, answer the question normally.
 
+BISHERIGER CHAT:
+{build_conversation_text(previous_messages)}
+
 KONTEXT:
 {context_text}
 
@@ -204,7 +337,7 @@ ANTWORT:
 
     try:
         selected_model = choose_model(prompt, context_text, attachments_text)
-        st.caption(f"Verwendetes Modell: {selected_model}")
+        st.info(f"Verwendetes Modell: {selected_model}")
         response = client.responses.create(
             model=selected_model,
             instructions="You are a helpful assistant.",
@@ -218,7 +351,5 @@ ANTWORT:
     # -----------------------------
     # STEP 4: Show assistant answer
     # -----------------------------
-    st.session_state.messages.append({"role": "assistant", "content": answer})
-
-    with st.chat_message("assistant"):
-        st.write(answer)
+    st.session_state.messages.append({"role": "assistant", "content": answer, "model": selected_model})
+    st.rerun()
