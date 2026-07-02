@@ -42,25 +42,17 @@ VECTOR_STORE_ID = st.secrets["OPENAI_VECTOR_STORE_ID"] # set this in your env va
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 MODEL_CHOICES = {
-    "Auto - passend zur Aufgabe": "auto",
     "Standard - GPT-5.4": "gpt-5.4",
     "Mittel - GPT-5.5": "gpt-5.5",
     "Maximal - GPT-5.5 Pro": "gpt-5.5-pro",
 }
 
-DEMANDING_TASK_KEYWORDS = (
-    "analysiere",
-    "analyse",
-    "ausfuehrlich",
-    "begründe",
-    "begrunde",
-    "complex",
-    "komplex",
-    "planung",
-    "reason",
-    "strategie",
-    "vergleiche",
-)
+EXPORT_CHOICES = {
+    "Nicht speichern": None,
+    "Als TXT speichern": "txt",
+    "Als Word-Dokument speichern": "docx",
+    "Als PDF speichern": "pdf",
+}
 
 # -----------------------------
 # STREAMLIT UI
@@ -71,21 +63,8 @@ st.title("CHECK-Ki Chatbot")
 # File uploads: allow attaching photos and documents
 uploaded_files = st.file_uploader("Fotos/Dokumente anhängen (optional)", type=None, accept_multiple_files=True)
 
-def choose_model(prompt_text, context_text="", attachments_text=""):
-    selected_model = MODEL_CHOICES[selected_model_label]
-    if selected_model != "auto":
-        return selected_model
-
-    combined_text = f"{prompt_text}\n{context_text}\n{attachments_text}".lower()
-    has_demanding_keyword = any(keyword in combined_text for keyword in DEMANDING_TASK_KEYWORDS)
-
-    if len(combined_text) > 2500 or bool(attachments_text.strip()):
-        return "gpt-5.5-pro"
-
-    if has_demanding_keyword or len(combined_text) > 1000:
-        return "gpt-5.5"
-
-    return "gpt-5.4"
+def choose_model(model_label):
+    return MODEL_CHOICES[model_label]
 
 
 def build_conversation_text(messages):
@@ -220,51 +199,58 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.write(m["content"])
 
-if st.session_state.messages:
-    txt_export = build_conversation_text(st.session_state.messages).encode("utf-8")
-    docx_export = build_docx_export(st.session_state.messages)
-    pdf_export = build_pdf_export(st.session_state.messages)
-
-    st.subheader("Chat speichern")
-    col_txt, col_docx, col_pdf = st.columns(3)
-    with col_txt:
-        st.download_button(
-            "TXT",
-            data=txt_export,
-            file_name="check-ki-chat.txt",
-            mime="text/plain",
+with st.container(border=True):
+    model_col, save_col = st.columns(2)
+    with model_col:
+        selected_model_label = st.selectbox(
+            "Model-Selector",
+            options=list(MODEL_CHOICES.keys()),
+            index=0,
+            key="model_selector",
         )
-    with col_docx:
-        if docx_export is not None:
-            st.download_button(
-                "Word",
-                data=docx_export,
-                file_name="check-ki-chat.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-        else:
-            st.button("Word", disabled=True)
-    with col_pdf:
-        if pdf_export is not None:
-            st.download_button(
-                "PDF",
-                data=pdf_export,
-                file_name="check-ki-chat.pdf",
-                mime="application/pdf",
-            )
-        else:
-            st.button("PDF", disabled=True)
+    with save_col:
+        selected_export_label = st.selectbox(
+            "Chat speichern",
+            options=list(EXPORT_CHOICES.keys()),
+            index=0,
+            disabled=not st.session_state.messages,
+            key="export_selector",
+        )
 
-selected_model_label = st.selectbox(
-    "Model-Selector",
-    options=list(MODEL_CHOICES.keys()),
-    index=0,
-    key="model_selector",
-)
+        selected_export = EXPORT_CHOICES[selected_export_label]
+        if selected_export == "txt":
+            st.download_button(
+                "Download",
+                data=build_conversation_text(st.session_state.messages).encode("utf-8"),
+                file_name="check-ki-chat.txt",
+                mime="text/plain",
+            )
+        elif selected_export == "docx":
+            docx_export = build_docx_export(st.session_state.messages)
+            if docx_export is not None:
+                st.download_button(
+                    "Download",
+                    data=docx_export,
+                    file_name="check-ki-chat.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            else:
+                st.button("Download", disabled=True)
+        elif selected_export == "pdf":
+            pdf_export = build_pdf_export(st.session_state.messages)
+            if pdf_export is not None:
+                st.download_button(
+                    "Download",
+                    data=pdf_export,
+                    file_name="check-ki-chat.pdf",
+                    mime="application/pdf",
+                )
+            else:
+                st.button("Download", disabled=True)
 
-with st.form("chat_form", clear_on_submit=True):
-    prompt = st.text_input("Frage stellen:")
-    submitted = st.form_submit_button("Senden")
+    with st.form("chat_form", clear_on_submit=True):
+        prompt = st.text_input("Frage stellen:")
+        submitted = st.form_submit_button("Senden")
 
 if submitted and prompt.strip():
     prompt = prompt.strip()
@@ -336,7 +322,7 @@ ANTWORT:
 """
 
     try:
-        selected_model = choose_model(prompt, context_text, attachments_text)
+        selected_model = choose_model(selected_model_label)
         st.info(f"Verwendetes Modell: {selected_model}")
         response = client.responses.create(
             model=selected_model,
