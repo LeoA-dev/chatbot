@@ -58,14 +58,14 @@ st.title("CHECK-Ki Chatbot")
 # File uploads: allow attaching photos and documents
 uploaded_files = st.file_uploader("Fotos/Dokumente anhängen (optional)", type=None, accept_multiple_files=True)
 
-# User prompt
-prompt = st.text_input("Frage stellen:")
-
 selected_model_label = st.selectbox(
-    "Modell je nach Aufgabe",
+    "Model-Selector",
     options=list(MODEL_CHOICES.keys()),
     index=0,
 )
+
+# User prompt
+prompt = st.text_input("Frage stellen:")
 
 
 def choose_model(prompt_text, context_text="", attachments_text=""):
