@@ -159,14 +159,12 @@ ANTWORT:
 """
 
     try:
-        completion = client.chat.completions.create(
+        response = client.responses.create(
             model="gpt-5.5-pro",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": final_prompt}
-            ]
+            instructions="You are a helpful assistant.",
+            input=final_prompt
         )
-        answer = completion.choices[0].message.content
+        answer = response.output_text
     except Exception as e:
         st.error(f"GPT error: {e}")
         st.stop()
