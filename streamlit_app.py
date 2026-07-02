@@ -54,6 +54,11 @@ EXPORT_CHOICES = {
     "Als PDF speichern": "pdf",
 }
 
+WEB_SEARCH_CHOICES = {
+    "Websuche aus": "off",
+    "Websuche an": "on",
+}
+
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
@@ -67,6 +72,108 @@ def choose_model(model_label):
     return MODEL_CHOICES[model_label]
 
 
+def get_value(item, key, default=None):
+    if isinstance(item, dict):
+        return item.get(key, default)
+
+    return getattr(item, key, default)
+
+
+def response_to_dict(response):
+    if hasattr(response, "model_dump"):
+        return response.model_dump()
+
+    if hasattr(response, "to_dict"):
+        return response.to_dict()
+
+    return {}
+
+
+def add_source(sources, seen_urls, url, title=None):
+    if not url or url in seen_urls:
+        return
+
+    seen_urls.add(url)
+    sources.append({
+        "title": title or url,
+        "url": url,
+    })
+
+
+def collect_annotation_sources(content_part, sources, seen_urls):
+    for annotation in get_value(content_part, "annotations", []) or []:
+        annotation_type = get_value(annotation, "type")
+        if annotation_type == "url_citation":
+            add_source(
+                sources,
+                seen_urls,
+                get_value(annotation, "url"),
+                get_value(annotation, "title"),
+            )
+            continue
+
+        citation = get_value(annotation, "url_citation")
+        if citation:
+            add_source(
+                sources,
+                seen_urls,
+                get_value(citation, "url"),
+                get_value(citation, "title"),
+            )
+
+
+def collect_tool_sources(action, sources, seen_urls):
+    for source in get_value(action, "sources", []) or []:
+        add_source(
+            sources,
+            seen_urls,
+            get_value(source, "url") or get_value(source, "source_url"),
+            get_value(source, "title"),
+        )
+
+
+def collect_response_sources(response):
+    sources = []
+    seen_urls = set()
+
+    for output_item in get_value(response, "output", []) or []:
+        if get_value(output_item, "type") == "message":
+            for content_part in get_value(output_item, "content", []) or []:
+                collect_annotation_sources(content_part, sources, seen_urls)
+        elif get_value(output_item, "type") == "web_search_call":
+            collect_tool_sources(get_value(output_item, "action", {}), sources, seen_urls)
+
+    response_data = response_to_dict(response)
+    for output_item in response_data.get("output", []) or []:
+        if output_item.get("type") == "message":
+            for content_part in output_item.get("content", []) or []:
+                collect_annotation_sources(content_part, sources, seen_urls)
+        elif output_item.get("type") == "web_search_call":
+            collect_tool_sources(output_item.get("action", {}), sources, seen_urls)
+
+    return sources
+
+
+def build_response_options(web_search_mode):
+    if web_search_mode == "off":
+        return {}
+
+    return {
+        "tools": [{"type": "web_search"}],
+        "tool_choice": "auto",
+        "include": ["web_search_call.action.sources"],
+    }
+
+
+def render_sources(sources):
+    if not sources:
+        return
+
+    with st.expander("Quellen", expanded=True):
+        for index, source in enumerate(sources, start=1):
+            st.markdown(f"{index}. [{source['title']}]({source['url']})")
+
+
 def build_conversation_text(messages):
     if not messages:
         return "Keine Nachrichten vorhanden."
@@ -78,6 +185,10 @@ def build_conversation_text(messages):
         model_suffix = f" ({model})" if model else ""
         lines.append(f"{role}{model_suffix}:")
         lines.append(message["content"])
+        if message.get("sources"):
+            lines.append("Quellen:")
+            for index, source in enumerate(message["sources"], start=1):
+                lines.append(f"{index}. {source['title']} - {source['url']}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -95,6 +206,10 @@ def build_docx_export(messages):
         heading = f"{role} ({model})" if model else role
         doc.add_heading(heading, level=2)
         doc.add_paragraph(message["content"])
+        if message.get("sources"):
+            doc.add_paragraph("Quellen:")
+            for index, source in enumerate(message["sources"], start=1):
+                doc.add_paragraph(f"{index}. {source['title']} - {source['url']}")
 
     output = io.BytesIO()
     doc.save(output)
@@ -141,6 +256,24 @@ def build_pdf_export(messages):
                 pdf.drawString(left_margin, y, line)
                 y -= line_height
             y -= 4
+
+        if message.get("sources"):
+            pdf.setFont("Helvetica-Bold", 10)
+            if y < 50:
+                pdf.showPage()
+                y = top_margin
+            pdf.drawString(left_margin, y, "Quellen:")
+            y -= line_height
+            pdf.setFont("Helvetica", 9)
+            for index, source in enumerate(message["sources"], start=1):
+                source_text = f"{index}. {source['title']} - {source['url']}"
+                for line in textwrap.wrap(source_text, width=105):
+                    if y < 50:
+                        pdf.showPage()
+                        y = top_margin
+                        pdf.setFont("Helvetica", 9)
+                    pdf.drawString(left_margin, y, line)
+                    y -= line_height
 
         y -= line_height
 
@@ -198,15 +331,23 @@ if "messages" not in st.session_state:
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.write(m["content"])
+        render_sources(m.get("sources"))
 
 with st.container(border=True):
-    model_col, save_col = st.columns(2)
+    model_col, web_col, save_col = st.columns(3)
     with model_col:
         selected_model_label = st.selectbox(
             "Model-Selector",
             options=list(MODEL_CHOICES.keys()),
             index=0,
             key="model_selector",
+        )
+    with web_col:
+        selected_web_search_label = st.selectbox(
+            "Websuche",
+            options=list(WEB_SEARCH_CHOICES.keys()),
+            index=0,
+            key="web_search_selector",
         )
     with save_col:
         selected_export_label = st.selectbox(
@@ -323,13 +464,21 @@ ANTWORT:
 
     try:
         selected_model = choose_model(selected_model_label)
+        selected_web_search = WEB_SEARCH_CHOICES[selected_web_search_label]
+        response_options = build_response_options(selected_web_search)
+        instructions = "You are a helpful assistant."
+        if selected_web_search != "off":
+            instructions += " Search the web when useful, cite sources inline, and prefer reliable sources."
+
         st.info(f"Verwendetes Modell: {selected_model}")
         response = client.responses.create(
             model=selected_model,
-            instructions="You are a helpful assistant.",
-            input=final_prompt
+            instructions=instructions,
+            input=final_prompt,
+            **response_options
         )
         answer = response.output_text
+        sources = collect_response_sources(response)
     except Exception as e:
         st.error(f"GPT error: {e}")
         st.stop()
@@ -337,5 +486,10 @@ ANTWORT:
     # -----------------------------
     # STEP 4: Show assistant answer
     # -----------------------------
-    st.session_state.messages.append({"role": "assistant", "content": answer, "model": selected_model})
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": answer,
+        "model": selected_model,
+        "sources": sources,
+    })
     st.rerun()
