@@ -28,6 +28,27 @@ VECTOR_STORE_ID = st.secrets["OPENAI_VECTOR_STORE_ID"] # set this in your env va
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+MODEL_CHOICES = {
+    "Auto - passend zur Aufgabe": "auto",
+    "Standard - GPT-5.4": "gpt-5.4",
+    "Mittel - GPT-5.5": "gpt-5.5",
+    "Maximal - GPT-5.5 Pro": "gpt-5.5-pro",
+}
+
+DEMANDING_TASK_KEYWORDS = (
+    "analysiere",
+    "analyse",
+    "ausfuehrlich",
+    "begründe",
+    "begrunde",
+    "complex",
+    "komplex",
+    "planung",
+    "reason",
+    "strategie",
+    "vergleiche",
+)
+
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
@@ -39,6 +60,29 @@ uploaded_files = st.file_uploader("Fotos/Dokumente anhängen (optional)", type=N
 
 # User prompt
 prompt = st.text_input("Frage stellen:")
+
+selected_model_label = st.selectbox(
+    "Modell je nach Aufgabe",
+    options=list(MODEL_CHOICES.keys()),
+    index=0,
+)
+
+
+def choose_model(prompt_text, context_text="", attachments_text=""):
+    selected_model = MODEL_CHOICES[selected_model_label]
+    if selected_model != "auto":
+        return selected_model
+
+    combined_text = f"{prompt_text}\n{context_text}\n{attachments_text}".lower()
+    has_demanding_keyword = any(keyword in combined_text for keyword in DEMANDING_TASK_KEYWORDS)
+
+    if len(combined_text) > 2500 or bool(attachments_text.strip()):
+        return "gpt-5.5-pro"
+
+    if has_demanding_keyword or len(combined_text) > 1000:
+        return "gpt-5.5"
+
+    return "gpt-5.4"
 
 
 def extract_text_from_file(uploaded_file):
@@ -159,8 +203,10 @@ ANTWORT:
 """
 
     try:
+        selected_model = choose_model(prompt, context_text, attachments_text)
+        st.caption(f"Verwendetes Modell: {selected_model}")
         response = client.responses.create(
-            model="gpt-5.5-pro",
+            model=selected_model,
             instructions="You are a helpful assistant.",
             input=final_prompt
         )
